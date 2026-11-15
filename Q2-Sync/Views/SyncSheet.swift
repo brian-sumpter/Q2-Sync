@@ -1,0 +1,533 @@
+//
+//  SyncSheet.swift
+//  Q2-Sync › Views
+//
+//  PURPOSE
+//  The sheet that walks through a sync: "Preparing…", then the preview of
+//  what will change (with removal choices and safety warnings), then
+//  progress with Cancel, then the result with the "update the library on
+//  your Q2" reminder.
+//
+//  HOW IT FITS
+//  Presented by `RootView` whenever `SyncCoordinator.phase` isn't idle.
+//  Each phase has its own small view below.
+//
+
+import AppKit
+import SwiftUI
+
+/// Switches between the sync phases.
+struct SyncSheet: View {
+
+    let sync: SyncCoordinator
+    let devices: DeviceMonitor
+
+    var body: some View {
+        Group {
+            switch sync.phase {
+            case .idle:
+                EmptyView()
+            case .planning(let message):
+                VStack(spacing: 14) {
+                    ProgressView()
+                    Text(message)
+                    Button("Cancel") { sync.close() }
+                }
+                .padding(32)
+                .frame(width: 360)
+            case .preview:
+                if let preview = sync.preview {
+                    SyncPreviewView(preview: preview, sync: sync, devices: devices)
+                }
+            case .running:
+                SyncProgressView(sync: sync)
+            case .finished:
+                if let report = sync.report {
+                    SyncResultView(report: report, profile: sync.preview?.profile ?? .q2Pod,
+                                   sync: sync, devices: devices)
+                }
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("Sync Stopped", systemImage: "xmark.octagon.fill")
+                        .font(.title2.bold())
+                        .foregroundStyle(.red)
+                    Text(message).fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer()
+                        Button("OK") { sync.close() }.keyboardShortcut(.defaultAction)
+                    }
+                }
+                .padding(24)
+                .frame(width: 440)
+            }
+        }
+        .interactiveDismissDisabled()
+    }
+}
+
+// MARK: - Preview
+
+/// Shows what a sync would do and lets the user apply it.
+struct SyncPreviewView: View {
+
+    let preview: SyncPreview
+    let sync: SyncCoordinator
+    let devices: DeviceMonitor
+
+    /// Shows the "remove more than 20%?" confirmation.
+    @State private var confirmingLargeRemoval = false
+
+    /// Shows the "permanently delete card-only files?" confirmation.
+    @State private var confirmingDeletes = false
+
+    private var plan: SyncPlan { preview.plan }
+    private var assessment: SafetyAssessment { preview.assessment(for: sync.options) }
+
+    /// Removal percentage for the user's current choices.
+    private var removalPercent: Int {
+        Int((plan.removalFraction(cardOnlyActions: sync.options.cardOnlyActions,
+                                  includeRemovals: sync.options.applyRemovals) * 100).rounded())
+    }
+
+    /// Card-only files set to "Delete from Card".
+    private var cardOnlyDeleteCount: Int {
+        plan.cardOnly.filter { sync.options.cardOnlyActions[$0.path] == .delete }.count
+    }
+
+    /// `true` if the user chose any action other than Leave for card-only files.
+    private var hasCardOnlyWork: Bool {
+        plan.cardOnly.contains { (sync.options.cardOnlyActions[$0.path] ?? .leave) != .leave }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+                .padding(20)
+            Divider()
+            details
+            Divider()
+            footer
+                .padding(16)
+        }
+        .frame(width: 660, height: 640)
+        .confirmationDialog("Permanently delete \(cardOnlyDeleteCount) files from the card?",
+                            isPresented: $confirmingDeletes) {
+            Button("Delete \(cardOnlyDeleteCount) Files and Sync", role: .destructive) {
+                continueApplying(deletesConfirmed: true)
+            }
+        } message: {
+            Text("These files aren't in your Mac library selection and can't be recovered after deleting. Choose “Move to Card Trash” instead to keep a copy on the card.")
+        }
+        .confirmationDialog(largeRemovalTitle, isPresented: $confirmingLargeRemoval) {
+            Button("Remove and Sync", role: .destructive) {
+                sync.options.largeRemovalConfirmed = true
+                sync.apply(devices: devices)
+            }
+        } message: {
+            Text("This is more than you usually change. Check the list above. You can turn off removing songs and sync just the additions instead.")
+        }
+    }
+
+    private var largeRemovalTitle: String {
+        "Remove \(removalPercent)% of the songs on “\(preview.deviceName)”?"
+    }
+
+    /// Runs the confirmations in order (deletes, then large removals),
+    /// then applies.
+    private func continueApplying(deletesConfirmed: Bool = false) {
+        if cardOnlyDeleteCount > 0 && !deletesConfirmed {
+            confirmingDeletes = true
+        } else if assessment.needsLargeRemovalConfirmation && !sync.options.largeRemovalConfirmed {
+            confirmingLargeRemoval = true
+        } else {
+            sync.apply(devices: devices)
+        }
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(preview.isFirstSync ? "Preview of Your First Sync" : "Ready to Sync")
+                .font(.title2.bold())
+
+            if preview.isFirstSync {
+                Label("Your first sync with a card is always a preview. Nothing has been changed. Review the list, then click Sync again to apply it.",
+                      systemImage: "eye")
+                    .foregroundStyle(.blue)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Counts at a glance.
+            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                GridRow {
+                    countCell("Add", plan.copies.filter { $0.kind == .add }.count, "plus.circle.fill", .green)
+                    countCell("Update", plan.copies.filter { $0.kind == .update }.count, "arrow.triangle.2.circlepath", .blue)
+                    countCell("Rename", plan.moves.count, "pencil.circle.fill", .purple)
+                }
+                GridRow {
+                    countCell("Remove", plan.removals.count, "minus.circle.fill", .red)
+                    countCell("Already on card", plan.unchangedCount + plan.adoptions.count, "checkmark.circle.fill", .secondary)
+                    countCell("Can't sync", plan.skipped.count, "exclamationmark.circle.fill", .orange)
+                }
+                if !plan.playlistPlan.writes.isEmpty || !plan.playlistPlan.removals.isEmpty || !plan.cardOnly.isEmpty {
+                    GridRow {
+                        countCell("Playlists", plan.playlistPlan.writes.count, "music.note.list", .pink)
+                        countCell("Remove playlists", plan.playlistPlan.removals.count, "minus.circle", .red)
+                        countCell("On card only", plan.cardOnly.count, "sdcard", .teal)
+                    }
+                }
+            }
+
+            Text(spaceSummary)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            ForEach(assessment.blockers, id: \.self) { blocker in
+                Label(blocker, systemImage: "xmark.octagon.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func countCell(_ title: String, _ count: Int, _ symbol: String, _ color: Color) -> some View {
+        Label {
+            Text("\(title): ") + Text(count.formatted()).bold()
+        } icon: {
+            Image(systemName: symbol).foregroundStyle(color)
+        }
+    }
+
+    /// e.g. "Copies 1.2 GB · 230.4 GB free afterwards".
+    private var spaceSummary: String {
+        let style = ByteCountFormatStyle(style: .file)
+        let copy = plan.bytesToCopy == 0 ? "Nothing to copy" : "Copies \(Int64(plan.bytesToCopy).formatted(style))"
+        let free = max(0, assessment.projectedFreeBytes).formatted(style)
+        return "\(copy) · about \(free) free on the card afterwards"
+    }
+
+    // MARK: Details
+
+    /// Every planned change, grouped, in a scrollable list.
+    private var details: some View {
+        List {
+            if !plan.removals.isEmpty {
+                Section {
+                    Toggle("Remove the \(plan.removals.count.formatted()) songs you no longer sync",
+                           isOn: Binding(get: { sync.options.applyRemovals },
+                                         set: { sync.options.applyRemovals = $0 }))
+                    Toggle("Move them to a trash folder on the card instead of deleting them",
+                           isOn: Binding(get: { sync.options.moveRemovalsToTrash },
+                                         set: { sync.options.moveRemovalsToTrash = $0 }))
+                        .disabled(!sync.options.applyRemovals)
+                    if assessment.needsLargeRemovalConfirmation {
+                        Label("That's \(removalPercent)% of the songs on this card. You'll be asked to confirm.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    ForEach(plan.removals) { removal in
+                        row(removal.entry.title, detail: removal.entry.path, symbol: "minus.circle", color: .red)
+                    }
+                } header: {
+                    Text("Remove")
+                } footer: {
+                    Text("Removals are off unless you turn them on. Songs not put there by Q2 Sync are never removed here.")
+                }
+            }
+            cardOnlySection
+            playlistSection
+            section("Add", plan.copies.filter { $0.kind == .add }) { copy in
+                row(copy.track.title, detail: copy.destination, symbol: "plus.circle", color: .green)
+            }
+            section("Update", plan.copies.filter { $0.kind == .update }) { copy in
+                row(copy.track.title, detail: "\(copy.destination) — \(copy.reason ?? "")",
+                    symbol: "arrow.triangle.2.circlepath", color: .blue)
+            }
+            section("Rename", plan.moves) { move in
+                row(move.track.title, detail: "\(move.from) → \(move.to)", symbol: "pencil.circle", color: .purple)
+            }
+            section("Already on the Card (Recorded, Not Copied)", plan.adoptions) { adoption in
+                row(adoption.track.title, detail: adoption.path, symbol: "checkmark.circle", color: .secondary)
+            }
+            section("Can't Sync", plan.skipped) { track in
+                row("\(track.displayArtist) — \(track.title)", detail: track.availability.reportDescription,
+                    symbol: track.availability.symbolName, color: .orange)
+            }
+            if plan.isEmpty {
+                ContentUnavailableView("Already Up to Date", systemImage: "checkmark.circle",
+                                       description: Text("Everything you selected is already on the card."))
+            }
+        }
+        .listStyle(.inset)
+    }
+
+    /// Music on the card that isn't in the Mac selection, each with a
+    /// choice: leave, copy to Mac, move to the card's trash, or delete.
+    @ViewBuilder
+    private var cardOnlySection: some View {
+        if !plan.cardOnly.isEmpty {
+            Section {
+                HStack {
+                    Text("Set all to:")
+                    ForEach(CardOnlyAction.allCases) { action in
+                        Button(action.title) {
+                            for item in plan.cardOnly { sync.options.cardOnlyActions[item.path] = action }
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                ForEach(plan.cardOnly) { item in
+                    HStack(alignment: .firstTextBaseline) {
+                        Image(systemName: item.origin == .unmanaged ? "sdcard" : "music.note.house")
+                            .foregroundStyle(.teal)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.displayName).lineLimit(1)
+                            Text(cardOnlyDetail(item))
+                                .font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer()
+                        // A pop-up menu bound to this file's choice.
+                        Picker("Action", selection: Binding(
+                            get: { sync.options.cardOnlyActions[item.path] ?? .leave },
+                            set: { sync.options.cardOnlyActions[item.path] = $0 })) {
+                            ForEach(CardOnlyAction.allCases) { Text($0.title).tag($0) }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+            } header: {
+                Text("On the Card Only (\(plan.cardOnly.count))")
+            } footer: {
+                Text("Music on the card that isn't part of what you sync. Nothing here changes unless you choose. “Copy to Mac” puts a copy in Downloads › Q2 Recovered for you to add to Music yourself; it never touches your Music library.")
+            }
+        }
+    }
+
+    /// e.g. "Old Rips/song.mp3 · 4.2 MB · already in your library".
+    private func cardOnlyDetail(_ item: CardOnlyItem) -> String {
+        var parts = [item.path, Int64(item.size).formatted(ByteCountFormatStyle(style: .file))]
+        if case .removedFromLibrary = item.origin { parts.append("synced earlier, no longer in your library") }
+        if item.isInLibrary { parts.append("already in your library: won't be copied") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Playlist files to write and remove, with any limits or renames.
+    @ViewBuilder
+    private var playlistSection: some View {
+        let playlists = plan.playlistPlan
+        if !playlists.writes.isEmpty || !playlists.removals.isEmpty || !playlists.overLimit.isEmpty {
+            Section {
+                ForEach(playlists.writes) { planned in
+                    row(planned.playlist.name,
+                        detail: planned.nameWasChanged ? "Saved as “\(planned.nameOnDevice)” (shortened or renamed for the Q2)"
+                                                       : planned.path,
+                        symbol: "music.note.list", color: .pink)
+                }
+                ForEach(playlists.removals) { removal in
+                    row((removal.path as NSString).lastPathComponent,
+                        detail: "No longer selected: its file is removed from the card",
+                        symbol: "minus.circle", color: .red)
+                }
+                if !playlists.overLimit.isEmpty {
+                    Label("The Q2 holds up to \(preview.profile.maximumPlaylists) playlists. These \(playlists.overLimit.count) won't be written: "
+                          + playlists.overLimit.map(\.name).joined(separator: ", "),
+                          systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                if playlists.otherPlaylistFiles > 0 {
+                    Label("The playlist folder also has \(playlists.otherPlaylistFiles) playlist files Q2 Sync didn't write. The Q2 imports those too, and they're left untouched.",
+                          systemImage: "info.circle")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Playlists (\(playlists.writes.count))")
+            } footer: {
+                Text("On the Q2, choose Library → Playlists → Import to bring these in. Removing a playlist's file doesn't remove a playlist you already imported; delete that on the Q2. Songs that aren't on the card (for example, cloud-only songs) are left out of playlists.")
+            }
+        }
+    }
+
+    /// A list section shown only when it has items.
+    @ViewBuilder
+    private func section<Item: Identifiable, Row: View>(_ title: String, _ items: [Item],
+                                                         @ViewBuilder row: @escaping (Item) -> Row) -> some View {
+        if !items.isEmpty {
+            Section("\(title) (\(items.count.formatted()))") {
+                ForEach(items) { row($0) }
+            }
+        }
+    }
+
+    private func row(_ title: String, detail: String, symbol: String, color: Color) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Image(systemName: symbol).foregroundStyle(color)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).lineLimit(1)
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+        }
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack {
+            if let log = preview.dryRunLogURL {
+                Button("Show Preview Log") { NSWorkspace.shared.activateFileViewerSelecting([log]) }
+            }
+            Spacer()
+            Button(preview.isFirstSync ? "Close" : "Cancel") { sync.close() }
+                .keyboardShortcut(.cancelAction)
+            if !preview.isFirstSync {
+                Button("Sync") { continueApplying() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!assessment.canApply || (plan.isEmpty && !hasCardOnlyWork))
+            }
+        }
+    }
+}
+
+// MARK: - Progress
+
+/// Progress bar, current item and Cancel.
+struct SyncProgressView: View {
+
+    let sync: SyncCoordinator
+
+    var body: some View {
+        let progress = sync.progress
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Syncing…").font(.title2.bold())
+            ProgressView(value: progress.fractionComplete)
+            Text(progress.currentItem.isEmpty ? "Starting…" : progress.currentItem)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(detail(progress))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            HStack {
+                Text("Don't disconnect the Q2 while syncing.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { sync.cancel() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+    }
+
+    /// e.g. "1.2 GB of 8.4 GB · 120 of 431 items".
+    private func detail(_ progress: SyncProgress) -> String {
+        let style = ByteCountFormatStyle(style: .file)
+        var parts: [String] = []
+        if progress.totalBytes > 0 {
+            parts.append("\(Int64(progress.bytesCopied).formatted(style)) of \(Int64(progress.totalBytes).formatted(style))")
+        }
+        if progress.totalOperations > 0 {
+            parts.append("\(progress.completedOperations.formatted()) of \(progress.totalOperations.formatted()) items")
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - Result
+
+/// The outcome, with the "update your Q2's library" reminder.
+struct SyncResultView: View {
+
+    let report: SyncReport
+    let profile: DeviceProfile
+    let sync: SyncCoordinator
+    let devices: DeviceMonitor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if report.succeeded {
+                Label("Sync Complete", systemImage: "checkmark.circle.fill")
+                    .font(.title2.bold())
+                    .foregroundStyle(.green)
+            } else if report.wasCancelled {
+                Label("Sync Cancelled", systemImage: "stop.circle.fill")
+                    .font(.title2.bold())
+                    .foregroundStyle(.orange)
+            } else {
+                Label("Sync Finished with Problems", systemImage: "exclamationmark.triangle.fill")
+                    .font(.title2.bold())
+                    .foregroundStyle(.orange)
+            }
+
+            Text(summary)
+
+            if let reason = report.abortReason {
+                Label(reason, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !report.errors.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(report.errors, id: \.self) { Text($0).font(.caption) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 120)
+            }
+
+            if report.succeeded && !sync.didEject {
+                Text("Eject the card now? You can also keep it connected to sync again.")
+                    .fontWeight(.medium)
+            } else if report.succeeded {
+                Text("The card has been ejected. Next, on your Q2:")
+                    .fontWeight(.medium)
+                ForEach(Array(profile.libraryUpdateSteps.enumerated()), id: \.offset) { index, step in
+                    Label(step, systemImage: "\(index + 1).circle")
+                }
+            } else {
+                Text("The card is still connected. Fix the problems above and sync again; songs already copied won't be copied twice.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                if let log = report.logURL {
+                    Button("Show Log") { NSWorkspace.shared.activateFileViewerSelecting([log]) }
+                }
+                Spacer()
+                if report.succeeded && !sync.didEject {
+                    Button("Not Now") { sync.close() }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Eject") { Task { await sync.ejectAfterSync(devices: devices) } }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(sync.isEjecting)
+                } else {
+                    Button("Done") { sync.close() }.keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 480)
+    }
+
+    /// e.g. "Added 12, updated 1, removed 0 · 84.3 MB in 0:42".
+    private var summary: String {
+        var parts = ["Added \(report.added)", "updated \(report.updated)"]
+        if report.moved > 0 { parts.append("renamed \(report.moved)") }
+        if report.removed + report.trashed > 0 { parts.append("removed \(report.removed + report.trashed)") }
+        if report.adopted > 0 { parts.append("recorded \(report.adopted) already on the card") }
+        if report.copiedBack > 0 { parts.append("\(report.copiedBack) copied to your Mac") }
+        if report.cardOnlyTrashed + report.cardOnlyRemoved > 0 {
+            parts.append("\(report.cardOnlyTrashed + report.cardOnlyRemoved) card-only files removed")
+        }
+        if report.playlistsWritten > 0 { parts.append("\(report.playlistsWritten) playlists written") }
+        if report.playlistsRemoved > 0 { parts.append("\(report.playlistsRemoved) playlists removed") }
+        let copied = report.bytesCopied == 0
+            ? "nothing copied"
+            : "\(Int64(report.bytesCopied).formatted(ByteCountFormatStyle(style: .file))) copied"
+        return parts.joined(separator: ", ") + " · \(copied)"
+    }
+}

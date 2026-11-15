@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Q2Sync.entitlements
+
+    PURPOSE
+    The App Sandbox permissions for Q2 Sync. macOS enforces these: the app
+    simply cannot do anything that isn't granted here, even if its code has
+    a bug. This is the first line of defence for your Apple Music library.
+
+    WHAT EACH KEY DOES
+    • app-sandbox
+        Turns the sandbox on. Without explicit grants, the app can only
+        touch its own container folder.
+    • assets.music.read-only
+        READ-ONLY access to ~/Music, which is what ITLibrary needs to read
+        the Apple Music library and what the copier needs to read audio
+        files. There is deliberately NO read-write variant here: the app
+        cannot write to ~/Music at all.
+    • files.user-selected.read-write
+        Lets the app use a folder you pick in an Open panel. Used for the
+        Q2's card, which you choose once when you first connect it. Every
+        write is still checked by the app's PathGuard, which refuses any
+        path outside the confirmed card. (If your music lives on an
+        external drive, that folder is remembered with a READ-ONLY bookmark.)
+    • files.bookmarks.app-scope
+        Lets the app remember that permission across launches using a
+        "security-scoped bookmark".
+    • files.user-selected.executable
+        Despite its name, this stops macOS from adding a
+        "com.apple.quarantine" tag to every file the app writes into the
+        folder you picked (the card). On exFAT/FAT cards that tag can only
+        be stored in a hidden "._<song>" companion file, which some players
+        list as a broken song. Q2 Sync only ever writes music, playlists and
+        its own small records, never programs.
+
+    • files.downloads.read-write
+        "Copy to Mac" for music that's only on the card writes into
+        ~/Downloads/Q2 Recovered (never into ~/Music). The RecoveryCopier
+        refuses any path outside that folder.
+
+    • network.client
+        Outgoing connections only, used for one thing: the optional check
+        of GitHub for new Q2 Pod releases (api.github.com). Nothing about
+        you or your library is sent.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.assets.music.read-only</key>
+    <true/>
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+    <key>com.apple.security.files.user-selected.executable</key>
+    <true/>
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>
