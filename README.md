@@ -15,7 +15,6 @@ date, and writes your playlists in a format the Q2 can import.
 > library**. It never writes to your library or its media folder in any way.
 > It only reads them and copies music *to* the Q2's card.
 
-<!-- Screenshots: replace these placeholders with real images in docs/images/. -->
 | | |
 | --- | --- |
 | ![Choosing what to sync](docs/images/device-music.png) | ![Sync preview](docs/images/sync-preview.png) |
