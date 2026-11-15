@@ -193,7 +193,7 @@ struct SyncPreviewView: View {
 
     private func countCell(_ title: String, _ count: Int, _ symbol: String, _ color: Color) -> some View {
         Label {
-            Text("\(title): ") + Text(count.formatted()).bold()
+            Text("\(title): \(Text(count.formatted()).bold())")
         } icon: {
             Image(systemName: symbol).foregroundStyle(color)
         }

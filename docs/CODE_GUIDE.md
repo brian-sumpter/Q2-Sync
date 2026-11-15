@@ -82,6 +82,7 @@ flowchart TB
 | `Q2-Sync/Views` | SwiftUI views |
 | `Tests/Q2SyncCoreTests` | Unit tests (Swift Testing) for Core |
 | `Config/Q2Sync.entitlements` | App Sandbox permissions, each one explained |
+| `Scripts/` | `install.sh` (build and install in /Applications), app icon generator |
 | `docs/` | This guide, the user guide, and the on-device check list |
 
 ### Swift features you'll meet
@@ -384,6 +385,16 @@ never reads the library at launch; you click **Read Library**.
 
 **Run the app:** open `Q2-Sync.xcodeproj` in Xcode, select the **Q2-Sync**
 scheme and **My Mac**, press ⌘R.
+
+**Install in /Applications:** `Scripts/install.sh` quits a running copy,
+builds the Release configuration into `build/Release-DerivedData`, and
+replaces `/Applications/Q2 Sync.app`. Use the installed copy day to day (for
+auto-sync and Open at login), and avoid running a Debug copy from Xcode at the
+same time, as both share the same bundle identifier.
+
+**App icon:** drawn in code by `Scripts/make-app-icon.swift`;
+`Scripts/make-app-icon.sh` regenerates every size in
+`Q2-Sync/Assets.xcassets/AppIcon.appiconset`.
 
 **Build from Terminal:**
 

@@ -58,11 +58,21 @@ date, and writes your playlists in a format the Q2 can import.
 
 ## Install and build
 
-There's no prebuilt release yet. To build it yourself:
+There's no prebuilt release yet. To build and install it yourself:
 
 1. Clone this repository.
-2. Open `Q2-Sync.xcodeproj` in Xcode.
-3. Select the **Q2-Sync** scheme and **My Mac**, then press **⌘R**.
+2. In Terminal, from the repository folder, run:
+
+   ```bash
+   Scripts/install.sh
+   ```
+
+   It builds the Release version and installs **Q2 Sync** in your
+   Applications folder (replacing an older copy). Run it again after updating
+   the code.
+
+To work on the app instead, open `Q2-Sync.xcodeproj` in Xcode, select the
+**Q2-Sync** scheme and **My Mac**, and press **⌘R**.
 
 The project signs locally ("Sign to Run Locally"), which is enough to run it
 on your own Mac. To share builds, set your Apple Developer team in the target's

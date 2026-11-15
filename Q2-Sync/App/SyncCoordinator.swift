@@ -256,14 +256,20 @@ final class SyncCoordinator {
         executor.recoveryCopier = RecoveryCopier(stagingFolder: RecoveryCopier.defaultStagingFolder,
                                                  protectedFolders: preview.protectedFolders)
         let options = options
+        let configuredExecutor = executor
 
-        task = Task {
-            let result = await executor.run(plan: preview.plan, manifest: preview.manifest, options: options) { update in
-                // Progress arrives on a background thread; hop to the main
-                // actor before touching UI state.
-                Task { @MainActor [weak self] in self?.progress = update }
-            }
-            await finish(with: result, devices: devices)
+        // Progress arrives on a background thread; hop to the main actor
+        // before touching UI state. `[weak self]` means neither this nor
+        // the task below keeps the coordinator alive on its own.
+        let reportProgress: @Sendable (SyncProgress) -> Void = { [weak self] update in
+            guard let self else { return }
+            Task { @MainActor in self.progress = update }
+        }
+
+        task = Task { [weak self] in
+            let result = await configuredExecutor.run(plan: preview.plan, manifest: preview.manifest,
+                                                      options: options, onProgress: reportProgress)
+            await self?.finish(with: result, devices: devices)
         }
     }
 
