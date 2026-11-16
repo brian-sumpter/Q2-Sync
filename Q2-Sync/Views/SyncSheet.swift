@@ -80,6 +80,17 @@ struct SyncPreviewView: View {
     /// Shows the "permanently delete card-only files?" confirmation.
     @State private var confirmingDeletes = false
 
+    /// Filters every list in the preview (title, artist, album or path).
+    @State private var searchText = ""
+
+    /// Sections the user opened or closed, by section ID. Sections the user
+    /// hasn't touched use `defaultExpanded(_:count:)`.
+    @State private var expansion: [String: Bool] = [:]
+
+    /// Sections with more items than this start collapsed, so a first sync
+    /// of thousands of songs doesn't bury the sections that need attention.
+    private static let collapseThreshold = 200
+
     private var plan: SyncPlan { preview.plan }
     private var assessment: SafetyAssessment { preview.assessment(for: sync.options) }
 
@@ -103,6 +114,10 @@ struct SyncPreviewView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
                 .padding(20)
+            Divider()
+            searchField
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             Divider()
             details
             Divider()
@@ -161,8 +176,8 @@ struct SyncPreviewView: View {
             // Counts at a glance.
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
                 GridRow {
-                    countCell("Add", plan.copies.filter { $0.kind == .add }.count, "plus.circle.fill", .green)
-                    countCell("Update", plan.copies.filter { $0.kind == .update }.count, "arrow.triangle.2.circlepath", .blue)
+                    countCell("Add", addCount, "plus.circle.fill", .green)
+                    countCell("Update", plan.copies.count - addCount, "arrow.triangle.2.circlepath", .blue)
                     countCell("Rename", plan.moves.count, "pencil.circle.fill", .purple)
                 }
                 GridRow {
@@ -209,52 +224,101 @@ struct SyncPreviewView: View {
 
     // MARK: Details
 
-    /// Every planned change, grouped, in a scrollable list.
-    private var details: some View {
-        List {
-            if !plan.removals.isEmpty {
-                Section {
-                    Toggle("Remove the \(plan.removals.count.formatted()) songs you no longer sync",
-                           isOn: Binding(get: { sync.options.applyRemovals },
-                                         set: { sync.options.applyRemovals = $0 }))
-                    Toggle("Move them to a trash folder on the card instead of deleting them",
-                           isOn: Binding(get: { sync.options.moveRemovalsToTrash },
-                                         set: { sync.options.moveRemovalsToTrash = $0 }))
-                        .disabled(!sync.options.applyRemovals)
-                    if assessment.needsLargeRemovalConfirmation {
-                        Label("That's \(removalPercent)% of the songs on this card. You'll be asked to confirm.",
-                              systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    }
-                    ForEach(plan.removals) { removal in
-                        row(removal.entry.title, detail: removal.entry.path, symbol: "minus.circle", color: .red)
-                    }
-                } header: {
-                    Text("Remove")
-                } footer: {
-                    Text("Removals are off unless you turn them on. Songs not put there by Q2 Sync are never removed here.")
+    private var addCount: Int { plan.copies.lazy.filter { $0.kind == .add }.count }
+
+    /// A search box above the list.
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Filter by song, artist, album or path", text: $searchText)
+                .textFieldStyle(.plain)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
+                .buttonStyle(.plain)
+                .help("Clear the filter")
             }
-            cardOnlySection
-            playlistSection
-            section("Add", plan.copies.filter { $0.kind == .add }) { copy in
-                row(copy.track.title, detail: copy.destination, symbol: "plus.circle", color: .green)
-            }
-            section("Update", plan.copies.filter { $0.kind == .update }) { copy in
-                row(copy.track.title, detail: "\(copy.destination) — \(copy.reason ?? "")",
-                    symbol: "arrow.triangle.2.circlepath", color: .blue)
-            }
-            section("Rename", plan.moves) { move in
-                row(move.track.title, detail: "\(move.from) → \(move.to)", symbol: "pencil.circle", color: .purple)
-            }
-            section("Already on the Card (Recorded, Not Copied)", plan.adoptions) { adoption in
-                row(adoption.track.title, detail: adoption.path, symbol: "checkmark.circle", color: .secondary)
-            }
-            section("Can't Sync", plan.skipped) { track in
+        }
+    }
+
+    private var trimmedSearch: String { searchText.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var isSearching: Bool { !trimmedSearch.isEmpty }
+
+    /// `true` when the filter is empty or any field contains it.
+    private func matches(_ fields: String?...) -> Bool {
+        let query = trimmedSearch
+        guard !query.isEmpty else { return true }
+        return fields.contains { $0?.localizedStandardContains(query) == true }
+    }
+
+    private func matches(_ track: Track, _ path: String) -> Bool {
+        matches(track.title, track.artist, track.albumArtist, track.album, path)
+    }
+
+    /// The plan's lists, narrowed by the filter.
+    private struct FilteredLists {
+        var removals: [RemoveOperation]
+        var cardOnly: [CardOnlyItem]
+        var playlistWrites: [PlannedPlaylist]
+        var playlistRemovals: [PlaylistRemoval]
+        var skipped: [Track]
+        var adds: [CopyOperation]
+        var updates: [CopyOperation]
+        var moves: [MoveOperation]
+        var adoptions: [AdoptOperation]
+
+        var isEmpty: Bool {
+            removals.isEmpty && cardOnly.isEmpty && playlistWrites.isEmpty && playlistRemovals.isEmpty
+                && skipped.isEmpty && adds.isEmpty && updates.isEmpty && moves.isEmpty && adoptions.isEmpty
+        }
+    }
+
+    private func filteredLists() -> FilteredLists {
+        let playlists = plan.playlistPlan
+        return FilteredLists(
+            removals: plan.removals.filter { matches($0.entry.title, $0.entry.artist, $0.entry.album, $0.entry.path) },
+            cardOnly: plan.cardOnly.filter { matches($0.title, $0.artist, $0.album, $0.path) },
+            playlistWrites: playlists.writes.filter { matches($0.playlist.name, $0.nameOnDevice, $0.path) },
+            playlistRemovals: playlists.removals.filter { matches($0.path) },
+            skipped: plan.skipped.filter { matches($0, "") },
+            adds: plan.copies.filter { $0.kind == .add && matches($0.track, $0.destination) },
+            updates: plan.copies.filter { $0.kind == .update && matches($0.track, $0.destination) },
+            moves: plan.moves.filter { matches($0.track, $0.from) || matches($0.to) },
+            adoptions: plan.adoptions.filter { matches($0.track, $0.path) })
+    }
+
+    /// Every planned change, grouped, in a scrollable list. Sections that
+    /// need a decision or explain a problem come first; long lists of
+    /// routine copies come last and start collapsed when large.
+    private var details: some View {
+        let lists = filteredLists()
+        return List {
+            removalSection(lists.removals)
+            cardOnlySection(lists.cardOnly)
+            playlistSection(writes: lists.playlistWrites, removals: lists.playlistRemovals)
+            collapsibleSection("skipped", "Can't Sync", lists.skipped, alwaysOpen: true) { track in
                 row("\(track.displayArtist) — \(track.title)", detail: track.availability.reportDescription,
                     symbol: track.availability.symbolName, color: .orange)
             }
-            if plan.isEmpty {
+            collapsibleSection("update", "Update", lists.updates) { copy in
+                row(copy.track.title, detail: "\(copy.destination) — \(copy.reason ?? "")",
+                    symbol: "arrow.triangle.2.circlepath", color: .blue)
+            }
+            collapsibleSection("rename", "Rename", lists.moves) { move in
+                row(move.track.title, detail: "\(move.from) → \(move.to)", symbol: "pencil.circle", color: .purple)
+            }
+            collapsibleSection("add", "Add", lists.adds) { copy in
+                row(copy.track.title, detail: copy.destination, symbol: "plus.circle", color: .green)
+            }
+            collapsibleSection("adopt", "Already on the Card (Recorded, Not Copied)", lists.adoptions) { adoption in
+                row(adoption.track.title, detail: adoption.path, symbol: "checkmark.circle", color: .secondary)
+            }
+            if isSearching && lists.isEmpty {
+                ContentUnavailableView.search(text: trimmedSearch)
+            } else if plan.isEmpty {
                 ContentUnavailableView("Already Up to Date", systemImage: "checkmark.circle",
                                        description: Text("Everything you selected is already on the card."))
             }
@@ -262,22 +326,55 @@ struct SyncPreviewView: View {
         .listStyle(.inset)
     }
 
+    /// Removal switches (always shown) and the songs to remove.
+    @ViewBuilder
+    private func removalSection(_ removals: [RemoveOperation]) -> some View {
+        if !plan.removals.isEmpty {
+            let expanded = isExpanded("remove", count: plan.removals.count)
+            Section {
+                Toggle("Remove the \(plan.removals.count.formatted()) songs you no longer sync",
+                       isOn: Binding(get: { sync.options.applyRemovals },
+                                     set: { sync.options.applyRemovals = $0 }))
+                Toggle("Move them to a trash folder on the card instead of deleting them",
+                       isOn: Binding(get: { sync.options.moveRemovalsToTrash },
+                                     set: { sync.options.moveRemovalsToTrash = $0 }))
+                    .disabled(!sync.options.applyRemovals)
+                if assessment.needsLargeRemovalConfirmation {
+                    Label("That's \(removalPercent)% of the songs on this card. You'll be asked to confirm.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                collapsibleRows(removals, expanded: expanded) { removal in
+                    row(removal.entry.title, detail: removal.entry.path, symbol: "minus.circle", color: .red)
+                }
+            } header: {
+                sectionHeader("Remove", shown: removals.count, total: plan.removals.count, expanded: expanded)
+            } footer: {
+                Text("Removals are off unless you turn them on. Songs not put there by Q2 Sync are never removed here.")
+            }
+        }
+    }
+
     /// Music on the card that isn't in the Mac selection, each with a
     /// choice: leave, copy to Mac, move to the card's trash, or delete.
     @ViewBuilder
-    private var cardOnlySection: some View {
+    private func cardOnlySection(_ items: [CardOnlyItem]) -> some View {
         if !plan.cardOnly.isEmpty {
+            let expanded = isExpanded("cardOnly", count: plan.cardOnly.count)
             Section {
                 HStack {
-                    Text("Set all to:")
+                    Text(isSearching ? "Set all \(items.count.formatted()) shown to:" : "Set all to:")
                     ForEach(CardOnlyAction.allCases) { action in
                         Button(action.title) {
-                            for item in plan.cardOnly { sync.options.cardOnlyActions[item.path] = action }
+                            var actions = sync.options.cardOnlyActions
+                            for item in items { actions[item.path] = action }
+                            sync.options.cardOnlyActions = actions
                         }
                         .controlSize(.small)
                     }
                 }
-                ForEach(plan.cardOnly) { item in
+                .disabled(items.isEmpty)
+                collapsibleRows(items, expanded: expanded) { item in
                     HStack(alignment: .firstTextBaseline) {
                         Image(systemName: item.origin == .unmanaged ? "sdcard" : "music.note.house")
                             .foregroundStyle(.teal)
@@ -299,9 +396,68 @@ struct SyncPreviewView: View {
                     }
                 }
             } header: {
-                Text("On the Card Only (\(plan.cardOnly.count))")
+                sectionHeader("On the Card Only", shown: items.count, total: plan.cardOnly.count, expanded: expanded)
             } footer: {
                 Text("Music on the card that isn't part of what you sync. Nothing here changes unless you choose. “Copy to Mac” puts a copy in Downloads › Q2 Recovered for you to add to Music yourself; it never touches your Music library.")
+            }
+        }
+    }
+
+    // MARK: Collapsing
+
+    /// Open/closed state for a section. While filtering, every section is
+    /// open so matches are never hidden.
+    private func isExpanded(_ id: String, count: Int, alwaysOpen: Bool = false) -> Binding<Bool> {
+        Binding(
+            get: { isSearching || (expansion[id] ?? (alwaysOpen || count <= Self.collapseThreshold)) },
+            set: { expansion[id] = $0 })
+    }
+
+    /// A section header that opens and closes its section, e.g. "Add (9,214)"
+    /// or, while filtering, "Add (12 of 9,214)".
+    private func sectionHeader(_ title: String, shown: Int, total: Int, expanded: Binding<Bool>) -> some View {
+        let count = shown == total ? total.formatted() : "\(shown.formatted()) of \(total.formatted())"
+        return Button {
+            withAnimation(.snappy) { expanded.wrappedValue.toggle() }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.bold())
+                    .rotationEffect(.degrees(expanded.wrappedValue ? 90 : 0))
+                Text("\(title) (\(count))")
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isSearching)
+        .help(expanded.wrappedValue ? "Hide this list" : "Show this list")
+    }
+
+    /// The item rows when open; a "Show all" link when closed.
+    @ViewBuilder
+    private func collapsibleRows<Item: Identifiable, Row: View>(_ items: [Item], expanded: Binding<Bool>,
+                                                                 @ViewBuilder row: @escaping (Item) -> Row) -> some View {
+        if expanded.wrappedValue {
+            ForEach(items) { row($0) }
+        } else if !items.isEmpty {
+            Button("Show all \(items.count.formatted())") {
+                withAnimation(.snappy) { expanded.wrappedValue = true }
+            }
+            .buttonStyle(.link)
+        }
+    }
+
+    /// A collapsible list section, shown only when it has items.
+    @ViewBuilder
+    private func collapsibleSection<Item: Identifiable, Row: View>(_ id: String, _ title: String, _ items: [Item],
+                                                                    alwaysOpen: Bool = false,
+                                                                    @ViewBuilder row: @escaping (Item) -> Row) -> some View {
+        if !items.isEmpty {
+            let expanded = isExpanded(id, count: items.count, alwaysOpen: alwaysOpen)
+            Section {
+                collapsibleRows(items, expanded: expanded, row: row)
+            } header: {
+                sectionHeader(title, shown: items.count, total: items.count, expanded: expanded)
             }
         }
     }
@@ -316,17 +472,17 @@ struct SyncPreviewView: View {
 
     /// Playlist files to write and remove, with any limits or renames.
     @ViewBuilder
-    private var playlistSection: some View {
+    private func playlistSection(writes: [PlannedPlaylist], removals: [PlaylistRemoval]) -> some View {
         let playlists = plan.playlistPlan
         if !playlists.writes.isEmpty || !playlists.removals.isEmpty || !playlists.overLimit.isEmpty {
             Section {
-                ForEach(playlists.writes) { planned in
+                ForEach(writes) { planned in
                     row(planned.playlist.name,
                         detail: planned.nameWasChanged ? "Saved as “\(planned.nameOnDevice)” (shortened or renamed for the Q2)"
                                                        : planned.path,
                         symbol: "music.note.list", color: .pink)
                 }
-                ForEach(playlists.removals) { removal in
+                ForEach(removals) { removal in
                     row((removal.path as NSString).lastPathComponent,
                         detail: "No longer selected: its file is removed from the card",
                         symbol: "minus.circle", color: .red)
@@ -346,17 +502,6 @@ struct SyncPreviewView: View {
                 Text("Playlists (\(playlists.writes.count))")
             } footer: {
                 Text("On the Q2, choose Library → Playlists → Import to bring these in. Removing a playlist's file doesn't remove a playlist you already imported; delete that on the Q2. Songs that aren't on the card (for example, cloud-only songs) are left out of playlists.")
-            }
-        }
-    }
-
-    /// A list section shown only when it has items.
-    @ViewBuilder
-    private func section<Item: Identifiable, Row: View>(_ title: String, _ items: [Item],
-                                                         @ViewBuilder row: @escaping (Item) -> Row) -> some View {
-        if !items.isEmpty {
-            Section("\(title) (\(items.count.formatted()))") {
-                ForEach(items) { row($0) }
             }
         }
     }
@@ -446,6 +591,9 @@ struct SyncResultView: View {
     let sync: SyncCoordinator
     let devices: DeviceMonitor
 
+    /// Errors listed on screen; the rest are in the log.
+    private static let maxErrorsShown = 100
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if report.succeeded {
@@ -469,9 +617,18 @@ struct SyncResultView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !report.errors.isEmpty {
+                // Capped and lazy: a failed sync of thousands of songs can
+                // produce thousands of errors; the log has all of them.
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(report.errors, id: \.self) { Text($0).font(.caption) }
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(report.errors.prefix(Self.maxErrorsShown).enumerated()), id: \.offset) {
+                            Text($0.element).font(.caption)
+                        }
+                        if report.errors.count > Self.maxErrorsShown {
+                            Text("and \((report.errors.count - Self.maxErrorsShown).formatted()) more — see the log")
+                                .font(.caption.italic())
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
